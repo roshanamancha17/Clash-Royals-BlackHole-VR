@@ -3,6 +3,8 @@ using UnityEngine.AI;
 
 public class EnemySpawnerVR : MonoBehaviour
 {
+    /* ───────────────────── CONFIG ───────────────────── */
+
     [Header("Enemy Troop Prefabs")]
     public GameObject archerPrefab;
     public GameObject knightPrefab;
@@ -13,23 +15,6 @@ public class EnemySpawnerVR : MonoBehaviour
     public Transform knightSpawnPoint;
     public Transform tankSpawnPoint;
 
-    [Header("Cooldowns")]
-    public float archerCooldown = 5f;
-    public float knightCooldown = 7f;
-    public float tankCooldown = 10f;
-
-    [Header("Difficulty Tuning")]
-    [Range(0.3f, 1f)]
-    public float spawnSpeedMultiplier = 0.7f;
-
-    [Header("Spawn Delay")]
-    public float initialDelay = 5f;
-
-    private float archerTimer;
-    private float knightTimer;
-    private float tankTimer;
-    private float elapsedTime;
-
     [Header("Enemy Energy (Hidden)")]
     public EnemyEnergySystem enemyEnergy;
 
@@ -38,73 +23,188 @@ public class EnemySpawnerVR : MonoBehaviour
     public float knightCost = 3f;
     public float tankCost = 5f;
 
-    [Header("Troop Control")]
+    [Header("Spawn Control")]
     public int maxEnemiesAlive = 3;
+    public float decisionInterval = 2.5f;
+    public float initialDelay = 5f;
+
+    [Header("Difficulty Tuning")]
+    [Range(0.3f, 1f)]
+    public float spawnSpeedMultiplier = 0.7f;
+
+    [Header("Aggression Settings")]
+    public float aggressiveDecisionMultiplier = 0.6f; // faster decisions
+    public int aggressiveExtraUnits = 1;               // pressure spike
+
+    /* ───────────────────── RUNTIME ───────────────────── */
+
+    private float decisionTimer;
+    private float elapsedTime;
+
+    private AIAggressionState aggressionState = AIAggressionState.Normal;
+    private BaseHealth enemyBase;
+
+    /* ───────────────────── UNITY ───────────────────── */
+
+    private void Start()
+    {
+        GameObject baseObj = GameObject.FindWithTag("EnemyBase");
+        if (baseObj != null)
+            enemyBase = baseObj.GetComponent<BaseHealth>();
+    }
 
     private void Update()
     {
-        if (enemyEnergy == null) return;
-
-        elapsedTime += Time.deltaTime;
-        if (elapsedTime < initialDelay) return;
-
-        if (CountEnemies() >= maxEnemiesAlive)
+        if (enemyEnergy == null || enemyBase == null)
             return;
 
-        float delta = Time.deltaTime * spawnSpeedMultiplier;
+        elapsedTime += Time.deltaTime;
 
-        archerTimer += delta;
-        knightTimer += delta;
-        tankTimer += delta;
+        if (elapsedTime < initialDelay)
+            return;
 
-        // Priority: Tank → Knight → Archer
-        TrySpawnTank();
-        TrySpawnKnight();
-        TrySpawnArcher();
+        UpdateAggressionState();
+
+        int allowedEnemies = maxEnemiesAlive;
+        float interval = decisionInterval;
+
+        if (aggressionState == AIAggressionState.Aggressive)
+        {
+            allowedEnemies += aggressiveExtraUnits;
+            interval *= aggressiveDecisionMultiplier;
+        }
+
+        if (CountEnemies() >= allowedEnemies)
+            return;
+
+        decisionTimer += Time.deltaTime * spawnSpeedMultiplier;
+
+        if (decisionTimer < interval)
+            return;
+
+        decisionTimer = 0f;
+
+        AttemptStrategicSpawn();
     }
 
-    void TrySpawnArcher()
-    {
-        if (archerTimer < archerCooldown) return;
-        if (!enemyEnergy.TrySpend(archerCost)) return;
+    /* ───────────────────── AGGRESSION LOGIC ───────────────────── */
 
-        SpawnEnemy(archerPrefab, archerSpawnPoint);
-        archerTimer = 0f;
+    private void UpdateAggressionState()
+    {
+        float healthRatio = enemyBase.currentHealth / enemyBase.maxHealth;
+
+        // Trigger aggression after 90% damage (≤10% HP)
+        if (healthRatio <= 0.1f)
+        {
+            aggressionState = AIAggressionState.Aggressive;
+        }
+        else
+        {
+            aggressionState = AIAggressionState.Normal;
+        }
     }
 
-    void TrySpawnKnight()
-    {
-        if (knightTimer < knightCooldown) return;
-        if (!enemyEnergy.TrySpend(knightCost)) return;
+    /* ───────────────────── AI DECISION ───────────────────── */
 
-        SpawnEnemy(knightPrefab, knightSpawnPoint);
-        knightTimer = 0f;
+    private void AttemptStrategicSpawn()
+    {
+        TroopType choice = DecideNextSpawn();
+
+        switch (choice)
+        {
+            case TroopType.Tank:
+                if (enemyEnergy.TrySpend(tankCost))
+                    SpawnEnemy(tankPrefab, tankSpawnPoint);
+                break;
+
+            case TroopType.Melee:
+                if (enemyEnergy.TrySpend(knightCost))
+                    SpawnEnemy(knightPrefab, knightSpawnPoint);
+                break;
+
+            case TroopType.Ranged:
+                if (enemyEnergy.TrySpend(archerCost))
+                    SpawnEnemy(archerPrefab, archerSpawnPoint);
+                break;
+        }
     }
 
-    void TrySpawnTank()
+    private TroopType DecideNextSpawn()
     {
-        if (tankTimer < tankCooldown) return;
-        if (!enemyEnergy.TrySpend(tankCost)) return;
+        GetPlayerTroopComposition(out int melee, out int ranged, out int tank);
 
-        SpawnEnemy(tankPrefab, tankSpawnPoint);
-        tankTimer = 0f;
+        // Aggressive mode favors tanks for pressure
+        if (aggressionState == AIAggressionState.Aggressive)
+        {
+            if (enemyEnergy.currentEnergy >= tankCost)
+                return TroopType.Tank;
+        }
+
+        if (ranged >= melee && ranged >= tank)
+            return TroopType.Tank;
+
+        if (tank > melee)
+            return TroopType.Melee;
+
+        return TroopType.Ranged;
     }
 
-    void SpawnEnemy(GameObject prefab, Transform spawnPoint)
+    /* ───────────────────── BATTLEFIELD ANALYSIS ───────────────────── */
+
+    private void GetPlayerTroopComposition(
+        out int melee,
+        out int ranged,
+        out int tank
+    )
     {
-        if (!prefab || !spawnPoint) return;
+        melee = 0;
+        ranged = 0;
+        tank = 0;
 
-        GameObject troop = Instantiate(prefab, spawnPoint.position, spawnPoint.rotation);
+        Troop[] troops = FindObjectsByType<Troop>(FindObjectsSortMode.None);
 
-        if (NavMesh.SamplePosition(troop.transform.position, out NavMeshHit hit, 5f, NavMesh.AllAreas))
-            troop.transform.position = hit.position;
+        foreach (var t in troops)
+        {
+            if (t == null) continue;
 
-        TeamComponent tc = troop.GetComponent<TeamComponent>();
+            TeamComponent tc = t.GetComponent<TeamComponent>();
+            if (tc == null || tc.team != Team.Player) continue;
+
+            switch (t.troopType)
+            {
+                case TroopType.Melee: melee++; break;
+                case TroopType.Ranged: ranged++; break;
+                case TroopType.Tank: tank++; break;
+            }
+        }
+    }
+
+    /* ───────────────────── SPAWN ───────────────────── */
+
+    private void SpawnEnemy(GameObject prefab, Transform spawnPoint)
+    {
+        if (prefab == null || spawnPoint == null)
+            return;
+
+        GameObject troopGO = Instantiate(prefab, spawnPoint.position, spawnPoint.rotation);
+
+        if (NavMesh.SamplePosition(
+            troopGO.transform.position,
+            out NavMeshHit hit,
+            5f,
+            NavMesh.AllAreas))
+        {
+            troopGO.transform.position = hit.position;
+        }
+
+        TeamComponent tc = troopGO.GetComponent<TeamComponent>();
         if (tc != null)
             tc.team = Team.Enemy;
     }
 
-    int CountEnemies()
+    /* ───────────────────── UTIL ───────────────────── */
+
+    private int CountEnemies()
     {
         Troop[] troops = FindObjectsByType<Troop>(FindObjectsSortMode.None);
         int count = 0;
@@ -112,10 +212,12 @@ public class EnemySpawnerVR : MonoBehaviour
         foreach (var t in troops)
         {
             if (t == null) continue;
+
             TeamComponent tc = t.GetComponent<TeamComponent>();
             if (tc != null && tc.team == Team.Enemy)
                 count++;
         }
+
         return count;
     }
 }

@@ -26,14 +26,30 @@ public class GameManagerVR : MonoBehaviour
     public GameObject elixir2xPopup;
     public float popDuration = 0.3f;
 
+    // ───────── Internal State ─────────
     private bool matchEnded = false;
     private bool overtimeTriggered = false;
+
+    private BaseHealth playerBase;
+    private BaseHealth enemyBase;
 
     public bool MatchEnded => matchEnded;
 
     private void Awake()
     {
         Instance = this;
+    }
+
+    private void Start()
+    {
+        // Cache base references once
+        playerBase = GameObject.FindWithTag("PlayerBase")?.GetComponent<BaseHealth>();
+        enemyBase = GameObject.FindWithTag("EnemyBase")?.GetComponent<BaseHealth>();
+
+        if (playerBase == null || enemyBase == null)
+        {
+            Debug.LogError("GameManagerVR: BaseHealth references missing!");
+        }
     }
 
     private void Update()
@@ -43,7 +59,7 @@ public class GameManagerVR : MonoBehaviour
         matchTime -= Time.deltaTime;
         UpdateTimerUI();
 
-        // 🔥 LAST 60s → DOUBLE ENERGY (ONCE)
+        // 🔥 LAST 60 SECONDS → DOUBLE ENERGY (ONLY ONCE)
         if (matchTime <= 60f && !overtimeTriggered)
         {
             overtimeTriggered = true;
@@ -58,31 +74,61 @@ public class GameManagerVR : MonoBehaviour
                 StartCoroutine(ShowElixir2xPopup());
         }
 
+        // ⏱ TIME OVER → COMPARE BASE HEALTH
         if (matchTime <= 0f)
         {
-            matchEnded = true;
             ResolveByTime();
         }
     }
 
     private void UpdateTimerUI()
     {
-        int m = Mathf.FloorToInt(matchTime / 60f);
-        int s = Mathf.FloorToInt(matchTime % 60f);
-        timerText.text = $"{m:00}:{s:00}";
+        if (timerText == null) return;
+
+        int minutes = Mathf.FloorToInt(matchTime / 60f);
+        int seconds = Mathf.FloorToInt(matchTime % 60f);
+        timerText.text = $"{minutes:00}:{seconds:00}";
     }
+
+    // ───────────────── MATCH RESOLUTION ─────────────────
 
     private void ResolveByTime()
     {
-        BaseHealth playerBase = GameObject.FindWithTag("PlayerBase").GetComponent<BaseHealth>();
-        BaseHealth enemyBase = GameObject.FindWithTag("EnemyBase").GetComponent<BaseHealth>();
+        if (matchEnded) return;
+        matchEnded = true;
 
-        EndMatch(playerBase.currentHealth > enemyBase.currentHealth);
+        float playerHP = playerBase != null ? playerBase.currentHealth : 0f;
+        float enemyHP = enemyBase != null ? enemyBase.currentHealth : 0f;
+
+        Debug.Log($"TIME OVER | Player HP: {playerHP} | Enemy HP: {enemyHP}");
+
+        if (playerHP > enemyHP)
+        {
+            EndMatch(true);
+        }
+        else if (enemyHP > playerHP)
+        {
+            EndMatch(false);
+        }
+        else
+        {
+            // TIE BREAK RULE (choose one)
+            // Option A: Player wins on tie
+            EndMatch(true);
+
+            // Option B (alternative): Enemy wins
+            // EndMatch(false);
+
+            // Option C (later): Sudden death
+        }
     }
 
+    // Called immediately when a base is destroyed
     public void OnBaseDestroyed(bool isPlayerBase)
     {
         if (matchEnded) return;
+
+        // If player base destroyed → player lost
         EndMatch(!isPlayerBase);
     }
 
@@ -93,8 +139,8 @@ public class GameManagerVR : MonoBehaviour
         if (GameFlowManager.Instance != null)
             GameFlowManager.Instance.lastMatchWon = playerWon;
 
-        winUI.SetActive(playerWon);
-        loseUI.SetActive(!playerWon);
+        if (winUI != null) winUI.SetActive(playerWon);
+        if (loseUI != null) loseUI.SetActive(!playerWon);
 
         Time.timeScale = 0f;
         StartCoroutine(LoadResultSceneDelay());
@@ -111,22 +157,28 @@ public class GameManagerVR : MonoBehaviour
             SceneManager.LoadScene(resultSceneName);
     }
 
+    // ───────────────── UI EFFECTS ─────────────────
+
     private IEnumerator ShowElixir2xPopup()
     {
         elixir2xPopup.SetActive(true);
 
         RectTransform rt = elixir2xPopup.GetComponent<RectTransform>();
         CanvasGroup cg = elixir2xPopup.GetComponent<CanvasGroup>();
-        if (!cg) cg = elixir2xPopup.AddComponent<CanvasGroup>();
+        if (cg == null) cg = elixir2xPopup.AddComponent<CanvasGroup>();
 
         float t = 0f;
+        Vector3 startScale = Vector3.zero;
+        Vector3 targetScale = Vector3.one * 1.2f;
+
         while (t < popDuration)
         {
             t += Time.unscaledDeltaTime;
             float n = t / popDuration;
 
-            rt.localScale = Vector3.Lerp(Vector3.zero, Vector3.one * 1.2f, n);
+            rt.localScale = Vector3.Lerp(startScale, targetScale, n);
             cg.alpha = n;
+
             yield return null;
         }
 
